@@ -4,19 +4,34 @@
 // @version      0.0.1
 // @description  Add playlist functionality to any website (even across domains!)
 // @author       Aaron Toomey <aaron@inkiebeard.com>
-// @match        *://*/*
-// @grant        none
+// @match        *://roosterteeth.com/*
+// @match        *://youtube.com/*
+// @match        *://*.roosterteeth.com/*
+// @match        *://*.youtube.com/*
+// @grant       none
 // ==/UserScript==
-
-const requiredScripts = [
-  "https://cdn.jsdelivr.net/npm/uuidv4@4.0.0/lib/uuidv4.min.js"
-];
-
-const playerIdMap = {
-  "roosterteeth.com": "video-player_html5_api"
+const config = {
+  version: "0.0.1",
+  state: "local",
+  namespace: "videoPlaylist",
+  playerIdMap: {
+    "roosterteeth.com": "#video-player_html5_api",
+    "youtube.com": ".html5-video-player video.html5-main-video"
+  }
 };
-
+const requiredScripts = [];
 let loadedScripts = [];
+
+// shotrtcode uuidv4 generator function from: https://gist.github.com/jed/982883
+function b(a) {
+  return a
+    ? (a ^ ((Math.random() * 16) >> (a / 4))).toString(16)
+    : ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, b);
+}
+
+function uuid() {
+  return b();
+}
 
 class playlist {
   nextVideo() {
@@ -45,10 +60,12 @@ class playlist {
 
   videoChangedHook() {
     const video = this.videos[this.currentVideoIndex];
+    window[config.namespace].storeData();
+    window.location = video.url;
   }
 
-  addVideo(url) {
-    this.videos.push(new videoItem(url));
+  addVideo(url, name) {
+    this.videos.push(new videoItem({ url, name }));
   }
 
   removeVideo(ind) {
@@ -57,14 +74,20 @@ class playlist {
 
   /**
    * @param id string - UID
+   * @param name string - name of playlist
    * @param options object - {player, videos}
    */
-  constructor(id, { player = null, videos = [] } = {}) {
-    this.videos = videos || [];
-    this.currentVideoIndex = null;
+  constructor({ id, name, player, videos, currentVideoIndex, autoplay } = {}) {
+    this.currentVideoIndex = currentVideoIndex || null;
     this.vidPlayer = player || null;
-    this.autoplay = true;
+    this.autoplay = autoplay || true;
     this.id = id;
+    this.name = name;
+    if (Array.isArray(videos)) {
+      videos.forEach(video => {
+        this.videos.push(new videoItem(video));
+      });
+    }
   }
 }
 
@@ -81,26 +104,59 @@ class playlistController {
     if (stored) {
       stored = JSON.parse(stored);
       if (stored.hasOwnProperty("playlists")) {
-        this.playlists = stored.playlists;
+        Object.keys(stored.playlists).forEach(pl => {
+          this.playlists[pl.id] = new playlist(pl);
+        });
       }
       if (stored.hasOwnProperty("currentPlaylist")) {
-        this.currentPlaylist = stored.currentPlaylist;
+        this.changePlaylist(stored.currentPlaylist);
       }
     }
   }
 
   findVidPlayer() {
-    // todo get vid player element from domain map
-    this.player = document.getElementById(playerIdMap[location.host]);
+    console.log(
+      `Finding vid player based on '${location.host}': selector is '${
+        config.playerIdMap[location.host]
+      }'`
+    );
+    this.player = document.querySelector(config.playerIdMap[location.host]);
   }
 
-  addPlaylist() {
-    const id = new uuid();
-    this.playlists[id] = new playlist(id, { player: this.player });
+  addPlaylist(name) {
+    const id = uuid();
+    this.playlists[id] = new playlist({ id, name, player: this.player });
+    return id;
   }
 
   removePlaylist(id) {
     delete this.playlists[id];
+  }
+
+  changePlaylist(id) {
+    if (this.playlists.hasOwnProperty(id)) {
+      this.currentPlaylist = id;
+      console.log(
+        `${config.namespace}: ${this.playlists[id].name} active playlist`
+      );
+    } else {
+      console.error(`Don't have playlist id ${id}`);
+    }
+  }
+
+  addVideoToCurrent(url, name) {
+    this.playlists[this.currentPlaylist].addVideo(url, name);
+  }
+
+  addVideoToPlaylist(url, vidName, plName) {
+    const plId = Object.keys(this.playlists).find(
+      id => this.playlists[id].name === plName
+    );
+    if (!plId) {
+      console.error(`Couldn't find playlsit with name ${plName}`);
+    } else {
+      this.playlists[plId].addVideo(url, vidName);
+    }
   }
 
   constructor() {
@@ -110,11 +166,23 @@ class playlistController {
     this.findVidPlayer();
     this.loadData();
     if (Object.keys(this.playlists).length === 0) {
-      this.addPlaylist();
+      this.changePlaylist(this.addPlaylist("default"));
+    } else if (this.currentPlaylist === null) {
+      this.changePlaylist(Object.keys(this.playlists)[0]);
     }
+
     window.addEventListener("beforeunload", e => {
+      e.preventDefault();
+      console.log("leaving page", e);
       this.storeData();
+      e.returnValue = "";
     });
+
+    console.log(
+      `Video Playlist (v${config.version}): '${config.namespace}' - running ${
+        config.state
+      } data`
+    );
   }
 }
 
@@ -127,20 +195,23 @@ class videoItem {
     this.currentTime = time;
   }
 
-  constructor(url, { currentTime } = {}) {
+  constructor({ url, name, currentTime, watched }) {
     this.url = url;
     this.currentTime = currentTime || 0;
-    this.watched = false;
+    this.watched = watched || false;
+    this.name = name;
   }
 }
 
 const loaded = url => {
   loadedScripts.push(url);
   if (loadedScripts.length === requiredScripts.length) {
-    window.beadroPlaylist = new playlistController();
+    window[config.namespace] =
+      window[config.namespace] || new playlistController();
   }
 };
-// Chrome doesn't alow require, workaround to load scripts into page before run
+
+// Chrome doesn't allow require, workaround to load scripts into page before run
 const requireScripts = urls => {
   urls.forEach(url => {
     var script = document.createElement("script");
@@ -152,8 +223,12 @@ const requireScripts = urls => {
   });
 };
 
-(function() {
+(() => {
   "use strict";
 
-  requireScripts(requiredScripts);
+  if (requiredScripts.length) {
+    requireScripts(requiredScripts);
+  }
+  window[config.namespace] =
+    window[config.namespace] || new playlistController();
 })();
